@@ -21,6 +21,7 @@ import numpy as np
 _UA = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'}
 
 app = Flask(__name__)
+app.url_map.strict_slashes = False   # treat /digest and /digest/ the same
 CFG_PATH = Path(__file__).parent / 'config.json'
 
 DEFAULT_CFG = {
