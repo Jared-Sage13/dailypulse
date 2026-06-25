@@ -1057,6 +1057,7 @@ function applyFilter(f){
   renderScrn(d);
 }
 document.querySelectorAll('.fbtn[data-f]').forEach(b=>b.addEventListener('click',()=>applyFilter(b.dataset.f)));
+(function(){const wl=document.getElementById('wl-input');if(wl)wl.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();saveWatchlist();}});})();
 
 async function loadScreener(){
   const r=await fetch('/api/screener').then(r=>r.json()).catch(()=>null);
