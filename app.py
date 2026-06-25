@@ -423,6 +423,14 @@ def api_screener():
     res.sort(key=lambda x:abs(x['pct']),reverse=True)
     return jsonify(res)
 
+@app.route('/api/lookup')
+def api_lookup():
+    sym=request.args.get('symbol','').strip().upper()
+    if not sym: return jsonify({'error':'empty'}),400
+    r=get_analysis(sym)
+    if not r: return jsonify({'error':f'No data for {sym}'}),404
+    return jsonify(r)
+
 @app.route('/api/news')
 def api_news():
     cat=request.args.get('category','all')
@@ -954,6 +962,11 @@ MARKETS_HTML = """<!DOCTYPE html><html lang="en"><head>
       <button class="btn btn-g" style="padding:6px 12px;font-size:12px" onclick="saveWatchlist()">Save &amp; Refresh</button>
     </div>
   </div>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+    <input class="winput" id="sc-search" placeholder="Search ticker — e.g. AAPL" style="width:240px">
+    <button class="btn btn-g" style="padding:6px 12px;font-size:12px" onclick="searchTicker()">Search</button>
+    <span id="sc-search-note" style="font-size:12px;color:var(--muted)"></span>
+  </div>
   <div class="tbl-wrap">
     <table>
       <thead><tr>
@@ -1044,6 +1057,23 @@ function renderScrn(data){
     </tr>`;
   }).join('');
 }
+async function searchTicker(){
+  const inp=document.getElementById('sc-search');
+  const note=document.getElementById('sc-search-note');
+  const sym=(inp.value||'').trim().toUpperCase();
+  if(!sym){return;}
+  note.textContent='Searching '+sym+'…';
+  let res;
+  try{ res=await fetch('/api/lookup?symbol='+encodeURIComponent(sym)); }
+  catch(e){ note.innerHTML='<span style="color:var(--neg)">Lookup failed</span>'; return; }
+  if(!res.ok){ note.innerHTML='<span style="color:var(--neg)">No data for '+sym+'</span>'; return; }
+  const d=await res.json();
+  note.textContent=''; inp.value='';
+  scData=[d, ...scData.filter(x=>x.symbol!==d.symbol)];
+  applyFilter('all');
+  const tb=document.getElementById('scrn');
+  if(tb&&tb.firstElementChild){tb.firstElementChild.style.outline='2px solid var(--acc)';}
+}
 function applyFilter(f){
   activeF=f;
   document.querySelectorAll('.fbtn').forEach(b=>b.classList.toggle('on',b.dataset.f===f));
@@ -1058,6 +1088,7 @@ function applyFilter(f){
 }
 document.querySelectorAll('.fbtn[data-f]').forEach(b=>b.addEventListener('click',()=>applyFilter(b.dataset.f)));
 (function(){const wl=document.getElementById('wl-input');if(wl)wl.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();saveWatchlist();}});})();
+(function(){const s=document.getElementById('sc-search');if(s)s.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();searchTicker();}});})();
 
 async function loadScreener(){
   const r=await fetch('/api/screener').then(r=>r.json()).catch(()=>null);
