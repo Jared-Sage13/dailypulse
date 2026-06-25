@@ -24,6 +24,17 @@ app = Flask(__name__)
 app.url_map.strict_slashes = False   # treat /digest and /digest/ the same
 CFG_PATH = Path(__file__).parent / 'config.json'
 
+# ── simple in-memory TTL cache (so we don't re-fetch Yahoo on every request) ────
+_ttl_cache = {}
+def cached(key, ttl, producer):
+    now = datetime.now().timestamp()
+    e = _ttl_cache.get(key)
+    if e and now - e[1] < ttl:
+        return e[0]
+    val = producer()
+    _ttl_cache[key] = (val, now)
+    return val
+
 DEFAULT_CFG = {
     'watchlist': ['AAPL','MSFT','NVDA','GOOGL','TSLA'],
     'anthropic_key': '', 'port': 5055,
@@ -402,27 +413,29 @@ def calendar_page(): return render_template_string(CALENDAR_HTML)
 def news_page(): return render_template_string(NEWS_HTML)
 
 @app.route('/api/indices')
-def api_indices(): return jsonify(parallel_quotes(INDICES))
+def api_indices(): return jsonify(cached('indices',60,lambda:parallel_quotes(INDICES)))
 
 @app.route('/api/sectors')
-def api_sectors(): return jsonify(parallel_quotes(SECTORS))
+def api_sectors(): return jsonify(cached('sectors',60,lambda:parallel_quotes(SECTORS)))
 
 @app.route('/api/assets')
-def api_assets(): return jsonify(parallel_quotes(ASSETS))
+def api_assets(): return jsonify(cached('assets',60,lambda:parallel_quotes(ASSETS)))
 
 @app.route('/api/screener')
 def api_screener():
-    tickers=list(dict.fromkeys(SCREENER+cfg().get('watchlist',[])))
-    res=[]; lock=threading.Lock()
-    def fetch(sym):
-        r=get_analysis(sym)
-        if r:
-            with lock: res.append(r)
-    threads=[threading.Thread(target=fetch,args=(s,),daemon=True) for s in tickers]
-    for t in threads: t.start()
-    for t in threads: t.join(timeout=60)
-    res.sort(key=lambda x:abs(x['pct']),reverse=True)
-    return jsonify(res)
+    def compute():
+        tickers=list(dict.fromkeys(SCREENER+cfg().get('watchlist',[])))
+        res=[]; lock=threading.Lock()
+        def fetch(sym):
+            r=get_analysis(sym)
+            if r:
+                with lock: res.append(r)
+        threads=[threading.Thread(target=fetch,args=(s,),daemon=True) for s in tickers]
+        for t in threads: t.start()
+        for t in threads: t.join(timeout=60)
+        res.sort(key=lambda x:abs(x['pct']),reverse=True)
+        return res
+    return jsonify(cached('screener',300,compute))
 
 _sec_cache={'data':None,'ts':0}
 def _sec_tickers():
@@ -511,35 +524,37 @@ def api_digest():
             if d and d.get('pct') is not None:
                 out.append({'name':name,'pct':round(d['pct'],2),'price':d.get('price')})
         return out
-    indices=pack(parallel_quotes(INDICES))
-    sectors=sorted(pack(parallel_quotes(SECTORS)),key=lambda x:x['pct'],reverse=True)
-    assets =sorted(pack(parallel_quotes(ASSETS)), key=lambda x:x['pct'],reverse=True)
-    up   =sum(1 for s in sectors if s['pct']>0)
-    down =sum(1 for s in sectors if s['pct']<0)
-    movers=sorted(sectors+assets,key=lambda x:abs(x['pct']),reverse=True)[:6]
-    spx=next((i['pct'] for i in indices if 'S&P' in i['name']), None)
-    news=get_news('all')
-    cats={}
-    for a in news: cats.setdefault(a['category'],[]).append(a)
-    news_by_cat=sorted(
-        [{'category':c,'count':len(arts),
-          'top':[{'title':x['title'],'src':x['src'],'link':x['link']} for x in arts[:3]]}
-         for c,arts in cats.items()],
-        key=lambda x:x['count'],reverse=True)
-    headlines=[{'title':x['title'],'src':x['src'],'link':x['link'],'category':x['category']} for x in news[:8]]
-    return jsonify({
-        'generated_at':datetime.now().strftime('%I:%M %p'),
-        'date':datetime.now().strftime('%A, %B %d, %Y'),
-        'spx':spx,
-        'breadth':{'up':up,'down':down,'total':len(sectors)},
-        'indices':indices,
-        'sectors_top':sectors[:3],
-        'sectors_bottom':sectors[-3:][::-1],
-        'movers':movers,
-        'news_by_cat':news_by_cat,
-        'headlines':headlines,
-        'news_total':len(news),
-    })
+    def compute():
+        indices=pack(cached('indices',60,lambda:parallel_quotes(INDICES)))
+        sectors=sorted(pack(cached('sectors',60,lambda:parallel_quotes(SECTORS))),key=lambda x:x['pct'],reverse=True)
+        assets =sorted(pack(cached('assets',60,lambda:parallel_quotes(ASSETS))), key=lambda x:x['pct'],reverse=True)
+        up   =sum(1 for s in sectors if s['pct']>0)
+        down =sum(1 for s in sectors if s['pct']<0)
+        movers=sorted(sectors+assets,key=lambda x:abs(x['pct']),reverse=True)[:6]
+        spx=next((i['pct'] for i in indices if 'S&P' in i['name']), None)
+        news=get_news('all')
+        cats={}
+        for a in news: cats.setdefault(a['category'],[]).append(a)
+        news_by_cat=sorted(
+            [{'category':c,'count':len(arts),
+              'top':[{'title':x['title'],'src':x['src'],'link':x['link']} for x in arts[:3]]}
+             for c,arts in cats.items()],
+            key=lambda x:x['count'],reverse=True)
+        headlines=[{'title':x['title'],'src':x['src'],'link':x['link'],'category':x['category']} for x in news[:8]]
+        return {
+            'generated_at':datetime.now().strftime('%I:%M %p'),
+            'date':datetime.now().strftime('%A, %B %d, %Y'),
+            'spx':spx,
+            'breadth':{'up':up,'down':down,'total':len(sectors)},
+            'indices':indices,
+            'sectors_top':sectors[:3],
+            'sectors_bottom':sectors[-3:][::-1],
+            'movers':movers,
+            'news_by_cat':news_by_cat,
+            'headlines':headlines,
+            'news_total':len(news),
+        }
+    return jsonify(cached('digest',300,compute))
 
 
 
