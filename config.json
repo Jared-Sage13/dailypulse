@@ -1,9 +1,4 @@
 {
-  "watchlist": [
-    "AMZN"
-  ],
-  "anthropic_key": "",
-  "port": 5055,
-  "portfolio": [],
-  "alerts": []
+  "watchlist": [],
+  "port": 5055
 }

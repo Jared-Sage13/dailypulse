@@ -423,13 +423,53 @@ def api_screener():
     res.sort(key=lambda x:abs(x['pct']),reverse=True)
     return jsonify(res)
 
+_sec_cache={'data':None,'ts':0}
+def _sec_tickers():
+    """Cached list of (ticker, company title) from the SEC's public file."""
+    now=datetime.now().timestamp()
+    if _sec_cache['data'] and now-_sec_cache['ts']<86400:
+        return _sec_cache['data']
+    try:
+        r=requests.get('https://www.sec.gov/files/company_tickers.json',
+                       headers={'User-Agent':'DailyPulse research dailypulse@example.com'},timeout=10)
+        data=[(v['ticker'].upper(), v.get('title','')) for v in r.json().values() if v.get('ticker')]
+        _sec_cache['data']=data; _sec_cache['ts']=now
+        return data
+    except Exception:
+        return _sec_cache['data'] or []
+
+def resolve_symbol(query):
+    """Resolve a ticker OR company name to a symbol + display name (SEC data)."""
+    ql=query.strip().lower()
+    if not ql: return None,None
+    data=_sec_tickers()
+    for tk,title in data:                       # exact ticker
+        if tk.lower()==ql: return tk,title
+    for tk,title in data:                       # exact company name
+        if title.lower()==ql: return tk,title
+    cands=[(tk,title) for tk,title in data if title.lower().startswith(ql)]
+    if not cands:
+        cands=[(tk,title) for tk,title in data if ql in title.lower()]
+    if cands:
+        cands.sort(key=lambda x:len(x[1]))      # prefer the shortest (most direct) name
+        return cands[0]
+    return None,None
+
 @app.route('/api/lookup')
 def api_lookup():
-    sym=request.args.get('symbol','').strip().upper()
-    if not sym: return jsonify({'error':'empty'}),400
-    r=get_analysis(sym)
-    if not r: return jsonify({'error':f'No data for {sym}'}),404
-    return jsonify(r)
+    q=request.args.get('symbol','').strip()
+    if not q: return jsonify({'error':'empty'}),400
+    # 1) try as a direct ticker
+    r=get_analysis(q.upper())
+    if r: return jsonify(r)
+    # 2) resolve by company name / fuzzy match
+    sym,name=resolve_symbol(q)
+    if sym:
+        r=get_analysis(sym)
+        if r:
+            if name: r['matched_name']=name
+            return jsonify(r)
+    return jsonify({'error':f'No match for "{q}"'}),404
 
 @app.route('/api/news')
 def api_news():
@@ -956,14 +996,9 @@ MARKETS_HTML = """<!DOCTYPE html><html lang="en"><head>
       <button class="fbtn" data-f="highvol">High Volume</button>
       <button class="fbtn" data-f="near52h">Near 52W High</button>
     </div>
-    <div class="watchlist-row" style="margin-bottom:0;padding:6px 10px;">
-      <label>Watchlist:</label>
-      <input class="winput" id="wl-input" placeholder="AAPL,TSLA,NVDA" style="width:220px">
-      <button class="btn btn-g" style="padding:6px 12px;font-size:12px" onclick="saveWatchlist()">Save &amp; Refresh</button>
-    </div>
   </div>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
-    <input class="winput" id="sc-search" placeholder="Search ticker — e.g. AAPL" style="width:240px">
+    <input class="winput" id="sc-search" placeholder="Search ticker or company — e.g. AAPL or Apple" style="width:300px">
     <button class="btn btn-g" style="padding:6px 12px;font-size:12px" onclick="searchTicker()">Search</button>
     <span id="sc-search-note" style="font-size:12px;color:var(--muted)"></span>
   </div>
@@ -1060,15 +1095,16 @@ function renderScrn(data){
 async function searchTicker(){
   const inp=document.getElementById('sc-search');
   const note=document.getElementById('sc-search-note');
-  const sym=(inp.value||'').trim().toUpperCase();
-  if(!sym){return;}
-  note.textContent='Searching '+sym+'…';
+  const q=(inp.value||'').trim();
+  if(!q){return;}
+  note.textContent='Searching…';
   let res;
-  try{ res=await fetch('/api/lookup?symbol='+encodeURIComponent(sym)); }
+  try{ res=await fetch('/api/lookup?symbol='+encodeURIComponent(q)); }
   catch(e){ note.innerHTML='<span style="color:var(--neg)">Lookup failed</span>'; return; }
-  if(!res.ok){ note.innerHTML='<span style="color:var(--neg)">No data for '+sym+'</span>'; return; }
+  if(!res.ok){ let m='No match for "'+q+'"'; try{m=(await res.json()).error||m;}catch(e){} note.innerHTML='<span style="color:var(--neg)">'+m+'</span>'; return; }
   const d=await res.json();
-  note.textContent=''; inp.value='';
+  note.innerHTML=d.matched_name?('<span style="color:var(--pos)">Showing '+d.symbol+' — '+d.matched_name+'</span>'):'';
+  inp.value='';
   scData=[d, ...scData.filter(x=>x.symbol!==d.symbol)];
   applyFilter('all');
   const tb=document.getElementById('scrn');
@@ -1087,7 +1123,6 @@ function applyFilter(f){
   renderScrn(d);
 }
 document.querySelectorAll('.fbtn[data-f]').forEach(b=>b.addEventListener('click',()=>applyFilter(b.dataset.f)));
-(function(){const wl=document.getElementById('wl-input');if(wl)wl.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();saveWatchlist();}});})();
 (function(){const s=document.getElementById('sc-search');if(s)s.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();searchTicker();}});})();
 
 async function loadScreener(){
@@ -1096,20 +1131,6 @@ async function loadScreener(){
   scData=r; applyFilter(activeF);
 }
 
-async function saveWatchlist(){
-  const raw=document.getElementById('wl-input').value.trim();
-  if(!raw)return;
-  const tickers=raw.toUpperCase().split(/[,\\s]+/).filter(Boolean);
-  await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({watchlist:tickers})});
-  scData=[]; document.getElementById('scrn').innerHTML='<tr><td colspan="11" class="loading">Refreshing…</td></tr>';
-  loadScreener();
-}
-
-async function initWatchlist(){
-  const c=await fetch('/api/config').then(r=>r.json()).catch(()=>({watchlist:[]}));
-  document.getElementById('wl-input').value=(c.watchlist||[]).join(', ');
-}
 
 function setUpdated(){
   const t=new Date();
@@ -1127,7 +1148,7 @@ async function refreshAll(){
   setUpdated();
 }
 
-loadIndices(); loadSectors(); loadAssets(); loadScreener(); initWatchlist();
+loadIndices(); loadSectors(); loadAssets(); loadScreener();
 setUpdated();
 </script>
 </body></html>
